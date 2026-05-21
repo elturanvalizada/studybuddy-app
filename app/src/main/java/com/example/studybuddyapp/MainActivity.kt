@@ -13,7 +13,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.studybuddyapp.ui.theme.StudyBuddyAppTheme
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.database.*
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.database.FirebaseDatabase
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,7 +63,9 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onRegisterClick: () -> Unit) {
     var error by remember { mutableStateOf("") }
 
     Column(
-        modifier = Modifier.padding(24.dp).fillMaxSize(),
+        modifier = Modifier
+            .padding(24.dp)
+            .fillMaxSize(),
         verticalArrangement = Arrangement.Center
     ) {
         Text("StudyBuddy Login", style = MaterialTheme.typography.headlineMedium)
@@ -119,7 +123,9 @@ fun RegisterScreen(onRegisterSuccess: () -> Unit, onBackToLogin: () -> Unit) {
     var error by remember { mutableStateOf("") }
 
     Column(
-        modifier = Modifier.padding(24.dp).fillMaxSize(),
+        modifier = Modifier
+            .padding(24.dp)
+            .fillMaxSize(),
         verticalArrangement = Arrangement.Center
     ) {
         Text("Create Account", style = MaterialTheme.typography.headlineMedium)
@@ -175,9 +181,16 @@ fun RegisterScreen(onRegisterSuccess: () -> Unit, onBackToLogin: () -> Unit) {
 fun SessionListScreen(onLogout: () -> Unit) {
     val auth = FirebaseAuth.getInstance()
     val db = FirebaseFirestore.getInstance()
-    val userId = auth.currentUser?.uid ?: ""
+    val realtimeDb = FirebaseDatabase
+        .getInstance("https://studybuddy-app-4182e-default-rtdb.europe-west1.firebasedatabase.app")
+        .reference
+    val currentUser = auth.currentUser
+    val userId = currentUser?.uid ?: ""
+    val userEmail = currentUser?.email ?: ""
 
     var sessions by remember { mutableStateOf(listOf<StudySession>()) }
+    var onlineUsersCount by remember { mutableStateOf(0) }
+
     var title by remember { mutableStateOf("") }
     var subject by remember { mutableStateOf("") }
     var dateTime by remember { mutableStateOf("") }
@@ -186,14 +199,67 @@ fun SessionListScreen(onLogout: () -> Unit) {
     var editingSessionId by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
-        db.collection("sessions")
-            .whereEqualTo("createdBy", userId)
-            .addSnapshotListener { snapshot, _ ->
-                sessions = snapshot?.documents?.mapNotNull { doc ->
-                    doc.toObject(StudySession::class.java)?.copy(sessionId = doc.id)
-                } ?: emptyList()
+    DisposableEffect(userId) {
+        if (userId.isNotEmpty()) {
+            val userPresenceRef = realtimeDb.child("presence").child(userId)
+
+            userPresenceRef.setValue(
+                mapOf(
+                    "online" to true,
+                    "email" to userEmail
+                )
+            )
+
+            userPresenceRef.child("online").onDisconnect().setValue(false)
+        }
+
+        onDispose {
+            if (userId.isNotEmpty()) {
+                realtimeDb.child("presence")
+                    .child(userId)
+                    .child("online")
+                    .setValue(false)
             }
+        }
+    }
+
+    LaunchedEffect(userId) {
+        if (userId.isNotEmpty()) {
+            db.collection("sessions")
+                .whereEqualTo("createdBy", userId)
+                .addSnapshotListener { snapshot, _ ->
+                    sessions = snapshot?.documents?.mapNotNull { doc ->
+                        doc.toObject(StudySession::class.java)?.copy(sessionId = doc.id)
+                    } ?: emptyList()
+                }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val presenceRef = realtimeDb.child("presence")
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                var count = 0
+
+                for (child in snapshot.children) {
+                    val online = child.child("online").getValue(Boolean::class.java) ?: false
+                    if (online) count++
+                }
+
+                onlineUsersCount = count
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                onlineUsersCount = 0
+            }
+        }
+
+        presenceRef.addValueEventListener(listener)
+
+        onDispose {
+            presenceRef.removeEventListener(listener)
+        }
     }
 
     val filteredSessions = sessions.filter {
@@ -201,12 +267,31 @@ fun SessionListScreen(onLogout: () -> Unit) {
                 it.subject.contains(search, ignoreCase = true)
     }
 
-    Column(modifier = Modifier.padding(16.dp).fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .padding(16.dp)
+            .fillMaxSize()
+    ) {
         Text("StudyBuddy Sessions", style = MaterialTheme.typography.headlineMedium)
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        Button(onClick = onLogout) {
+        Text("Online users: $onlineUsersCount")
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                if (userId.isNotEmpty()) {
+                    realtimeDb.child("presence")
+                        .child(userId)
+                        .child("online")
+                        .setValue(false)
+                }
+
+                onLogout()
+            }
+        ) {
             Text("Logout")
         }
 
@@ -221,10 +306,33 @@ fun SessionListScreen(onLogout: () -> Unit) {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = subject, onValueChange = { subject = it }, label = { Text("Subject") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = dateTime, onValueChange = { dateTime = it }, label = { Text("Date and time") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("Location") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Title") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = subject,
+            onValueChange = { subject = it },
+            label = { Text("Subject") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = dateTime,
+            onValueChange = { dateTime = it },
+            label = { Text("Date and time") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = location,
+            onValueChange = { location = it },
+            label = { Text("Location") },
+            modifier = Modifier.fillMaxWidth()
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -247,7 +355,10 @@ fun SessionListScreen(onLogout: () -> Unit) {
                 if (editingSessionId == null) {
                     db.collection("sessions").add(session)
                 } else {
-                    db.collection("sessions").document(editingSessionId!!).update(session as Map<String, Any>)
+                    db.collection("sessions")
+                        .document(editingSessionId!!)
+                        .update(session as Map<String, Any>)
+
                     editingSessionId = null
                 }
 
